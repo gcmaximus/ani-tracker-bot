@@ -1,13 +1,13 @@
 import configparser
-import base64
-import json
 import sqlite3
 import requests
 import secrets
+import time
+from bs4 import BeautifulSoup
 from datetime import datetime
 from typing import Final
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, CallbackContext
 
 config = configparser.ConfigParser()
 config.read('config.ini')
@@ -57,10 +57,38 @@ def fetch_anime_info(anime_id):
     response = requests.get(f'https://api.myanimelist.net/v2/anime/{anime_id}?fields=id,title,start_date,synopsis,status,num_episodes,broadcast', headers=auth_header)
     results = response.json()
     return results
+
+async def get_latest_episode(anime_id):
+    print(anime_id)
+
+    anime_url =f'https://myanimelist.net/anime/{anime_id}'
+    x = requests.get(anime_url)
+    soup = BeautifulSoup(x.text, 'html.parser')
+    a_tag = soup.find('a',string='Episodes')
+
+    if a_tag:
+        href = a_tag.get('href')
+        print(href)
+    else:
+        print('<a> not found')
+
+    x = requests.get(href)
+    soup = BeautifulSoup(x.text, 'html.parser')
+
+    episodes = soup.find_all('tr',{'class':'episode-list-data'})
+    return len(episodes)
+
+
 # Commands
 
 # /start
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    # TODO: set interval to 3600 (1hr)
+    # TODO: prevent multiple of same job (user keeps entering /start)
+
+    context.job_queue.run_repeating(check_new_episodes, interval=20,first=1.0,chat_id=update.message.chat_id)
+
     await update.message.reply_text('Hi! I am a bot that notifies you of new anime episodes based on your anime list. Run /help for a list of commands to get started.')
 
 # /help
@@ -79,7 +107,7 @@ async def view_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect('database.db')
     c = conn.cursor()
-    c.execute('SELECT a.title FROM animes AS a, userlists AS u WHERE u.user_id = ? AND a.anime_id = u.anime_id', (user_id, ))
+    c.execute('SELECT a.title, a.latest_episode, a.num_episodes FROM animes AS a, userlists AS u WHERE u.user_id = ? AND a.anime_id = u.anime_id', (user_id, ))
     anime_list = c.fetchall()
     conn.close()
 
@@ -91,7 +119,8 @@ async def view_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         count = 1
         for anime in anime_list:
-            text += f"{count}. {anime[0]}\n"
+            title, latest_episode, num_episodes = anime
+            text += f"{count}. {title}\t\t({latest_episode}/{num_episodes})\n"
             count += 1
 
 
@@ -107,6 +136,11 @@ async def add_anime_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(query.strip()) < 3 or len(query.strip()) > 50:
         print('Invalid anime name')
         await update.message.reply_text('Run /add [anime] to search for animes to add to your list.\nEnsure your input is 3-50 characters long.')
+        return
+    
+    if '_' in query:
+        print('Invalid anime name')
+        await update.message.reply_text('Your input cannot contain the underscore ( _ ) character.')
         return
 
     # access_token = get_mal_access_token()
@@ -181,6 +215,122 @@ async def remove_anime_command(update: Update, context: ContextTypes.DEFAULT_TYP
                     count += 1
 
             await update.message.reply_text(text, parse_mode="Markdown")
+
+
+
+
+
+
+# TODO: allow users to start and stop tracking. for now, tracking will default start upon /start
+
+# def remove_job_if_exists(name: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
+#     """Remove job with given name. Returns whether job was removed."""
+#     current_jobs = context.job_queue.get_jobs_by_name(name)
+#     print('current jobs', current_jobs)
+#     if not current_jobs:
+#         print(False)
+#         return False
+#     for job in current_jobs:
+#         job.schedule_removal()
+#     print(True)
+#     return True
+
+# # /trackstart
+# async def start_track_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+#     print(update.message)
+#     chat_id = update.message.chat.id
+#     print(chat_id)
+
+#     job_removed = remove_job_if_exists(str(chat_id),context)
+#     if job_removed:
+#         await update.message.reply_text('Tracking is already running.')
+#     else:
+#         print(context.job_queue)
+#         context.job_queue.run_repeating(check_new_episodes, interval=5, first=0)
+#         print(context.job_queue)
+#         await update.message.reply_text('Started tracking for new episodes.')
+
+# # /trackstop
+# async def stop_track_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+#     print(update.message)
+#     chat_id = update.message.chat_id
+#     job_removed = remove_job_if_exists(str(chat_id),context)
+#     if job_removed:
+#         await update.message.reply_text('Stopped tracking for new episodes.')
+#     else:
+#         await update.message.reply_text('Tracking is not running.')
+        
+        
+
+
+
+# Check for new episodes
+async def check_new_episodes(context: ContextTypes.DEFAULT_TYPE):
+    print('Checking for new episode...')
+    conn = sqlite3.connect('database.db')
+    c = conn.cursor()
+
+    # Only check the animes from the database which the user has
+
+    # TODO: remove anime which finished airing from database?? (not sure)
+
+    c.execute('SELECT a.anime_id, a.title, a.num_episodes, a.latest_episode FROM animes AS a, userlists AS u WHERE a.anime_id = u.anime_id AND a.status != "finished_airing"')
+    results = c.fetchall()
+    print(results)
+    conn.close()
+
+    for anime in results:
+        id, title, num_episodes, latest_episode_db = anime
+        latest_episode_online = await get_latest_episode(id)
+
+
+        # if id == 52481:
+        #     latest_episode_online = 12
+
+        print(latest_episode_online, latest_episode_db)
+
+        # New episode!
+        if latest_episode_online > latest_episode_db:
+            print('new ep')
+            status = 'currently_airing'
+
+            notification = f'Episode {latest_episode_online} of *{title}* has been released!'
+
+            # Anime ended, remove from database
+            if num_episodes == latest_episode_online:
+                print('anime ended')
+                status = 'finished_airing'
+                notification += '\nThis anime has ended!'
+
+                # Update database
+                conn = sqlite3.connect('database.db')
+                c = conn.cursor()
+                c.execute('DELETE FROM animes WHERE anime_id = ?',(id,))
+                conn.commit()
+                conn.close()
+
+            else:
+                # Update database
+                conn = sqlite3.connect('database.db')
+                c = conn.cursor()
+                c.execute('UPDATE animes SET status = ?, latest_episode = ? WHERE anime_id = ?', (status, latest_episode_online,id,))
+                conn.commit()
+                conn.close()
+
+            print('context\n',context)
+
+            print(context.job.chat_id)
+
+            # Notify user
+            await context.bot.send_message(context.job.chat_id, text=notification,parse_mode="Markdown")
+
+
+
+        # No new episode :(
+        else:
+            print('NO new ep')
+            pass
+
 
 # Callback query handler
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -323,6 +473,7 @@ Status: {status}
             start_date = anime_info['start_date']
             num_episodes = anime_info['num_episodes']
             status = anime_info['status']
+            latest_episode = get_latest_episode(anime_id)
             # print(status)
             try:
                 broadcast_day = anime_info['broadcast']['day_of_the_week']
@@ -331,7 +482,7 @@ Status: {status}
             except:
                 broadcast_day = broadcast_time = None
 
-            c.execute("INSERT INTO animes (anime_id, title, synopsis, start_date, num_episodes, status, broadcast_day, broadcast_time) VALUES (?,?,?,?,?,?,?,?)", (anime_id, title, synopsis, start_date, num_episodes, status, broadcast_day, broadcast_time, ))
+            c.execute("INSERT INTO animes (anime_id, title, synopsis, start_date, num_episodes, latest_episode, status, broadcast_day, broadcast_time) VALUES (?,?,?,?,?,?,?,?,?)", (anime_id, title, synopsis, start_date, num_episodes, latest_episode, status, broadcast_day, broadcast_time, ))
 
         # Add entry to "userlists" table
         c.execute("INSERT INTO userlists (user_id, anime_id) VALUES (?,?)", (user_id, anime_id, ))
@@ -381,8 +532,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f'Update {update} caused error {context.error}')
 
-
-if __name__ == '__main__':
+def main():
     print('Starting bot...')
     app = Application.builder().token(TOKEN).build()
 
@@ -402,6 +552,7 @@ if __name__ == '__main__':
         synopsis TEXT,
         start_date DATE,
         num_episodes INTEGER,
+        latest_episode INTEGER,
         status TEXT,
         broadcast_day TEXT,
         broadcast_time TIME
@@ -428,6 +579,8 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler('list', view_list_command))
     app.add_handler(CommandHandler('add', add_anime_command))
     app.add_handler(CommandHandler('remove', remove_anime_command))
+    # app.add_handler(CommandHandler('trackstart', start_track_command))
+    # app.add_handler(CommandHandler('trackstop', stop_track_command))
 
     # Messages
     app.add_handler(MessageHandler(filters.TEXT, handle_message))
@@ -438,6 +591,12 @@ if __name__ == '__main__':
     # Errors
     app.add_error_handler(error)
 
+
+
     # Polls the bot
     print('Polling...')
     app.run_polling(poll_interval=3)
+
+if __name__ == '__main__':
+    main()
+    
