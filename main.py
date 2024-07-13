@@ -3,12 +3,18 @@ import sqlite3
 import requests
 import secrets
 import time
+import asyncio
+import threading
+import schedule
+import aiohttp
 from bs4 import BeautifulSoup
 from datetime import datetime
 from typing import Final
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, CallbackContext
 
+
+# Fetch configurations
 config = configparser.ConfigParser()
 config.read('config.ini')
 TOKEN: Final = config['botinfo']['token']
@@ -16,80 +22,56 @@ BOT_USERNAME: Final = config['botinfo']['bot_username']
 MAL_CLIENT_ID: Final = config['mal']['client_id']
 MAL_ACCESS_TOKEN: Final = config['mal']['access_token']
 
-# # Helper
-def get_new_code_verifier() -> str:
-    token = secrets.token_urlsafe(100)
-    return token[:128]
-
-def get_mal_access_token():
-    code_challenge = get_new_code_verifier()
-    auth_url = f"https://myanimelist.net/v1/oauth2/authorize?response_type=code&client_id={MAL_CLIENT_ID}&code_challenge={code_challenge}"
-    print(auth_url)
-    print(requests.get(auth_url).text)
-    code = input('key in code >> ')
-    print()
-    # print(access_token)
-
-    data = {
-        "client_id":MAL_CLIENT_ID,
-        "grant_type":"authorization_code",
-        "code":code,
-        "code_verifier":code_challenge
-    }
-
-    response = requests.post('https://myanimelist.net/v1/oauth2/token', data=data)
-
-    print(response.text)
-
-def fetch_anime_search_results(query,offset=0):
+# Helper functions
+async def fetch_anime_search_results(query, offset=0):
     auth_header = {
         "Authorization": "Bearer " + MAL_ACCESS_TOKEN
     }
-    response = requests.get(f'https://api.myanimelist.net/v2/anime?q={query}&limit=4&offset={offset}', headers=auth_header)
-    
-    results = response.json()['data']
-    return results
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f'https://api.myanimelist.net/v2/anime?q={query}&limit=4&offset={offset}&nsfw=true', headers=auth_header) as response:
+            results = await response.json()
+    return results['data']
 
-def fetch_anime_info(anime_id):
+async def fetch_anime_info(anime_id):
     auth_header = {
         "Authorization": "Bearer " + MAL_ACCESS_TOKEN
     }
-    response = requests.get(f'https://api.myanimelist.net/v2/anime/{anime_id}?fields=id,title,start_date,synopsis,status,num_episodes,broadcast', headers=auth_header)
-    results = response.json()
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f'https://api.myanimelist.net/v2/anime/{anime_id}?fields=id,title,start_date,synopsis,status,num_episodes,broadcast', headers=auth_header) as response:
+            results = await response.json()
     return results
 
 async def get_latest_episode(anime_id):
-    print(anime_id)
-
-    anime_url =f'https://myanimelist.net/anime/{anime_id}'
-    x = requests.get(anime_url)
-    soup = BeautifulSoup(x.text, 'html.parser')
-    a_tag = soup.find('a',string='Episodes')
-
+    anime_url = f'https://myanimelist.net/anime/{anime_id}'
+    async with aiohttp.ClientSession() as session:
+        async with session.get(anime_url) as response:
+            page_content = await response.text()
+    soup = BeautifulSoup(page_content, 'html.parser')
+    a_tag = soup.find('a', string='Episodes')
     if a_tag:
         href = a_tag.get('href')
-        print(href)
     else:
-        print('<a> not found')
+        return None
 
-    x = requests.get(href)
-    soup = BeautifulSoup(x.text, 'html.parser')
-
-    episodes = soup.find_all('tr',{'class':'episode-list-data'})
+    async with aiohttp.ClientSession() as session:
+        async with session.get(href) as response:
+            page_content = await response.text()
+    soup = BeautifulSoup(page_content, 'html.parser')
+    episodes = soup.find_all('tr', {'class': 'episode-list-data'})
     return len(episodes)
 
-
-# Commands
-
+# Command functions
 # /start
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # TODO: set interval to 3600 (1hr)
     # TODO: prevent multiple of same job (user keeps entering /start)
 
-    context.job_queue.run_repeating(check_new_episodes, interval=20,first=1.0,chat_id=update.message.chat_id)
+    print('/start')
+
 
     await update.message.reply_text('Hi! I am a bot that notifies you of new anime episodes based on your anime list. Run /help for a list of commands to get started.')
+    context.job_queue.run_repeating(check_new_episodes, interval=30,first=1.0,chat_id=update.message.chat_id)
 
 # /help
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -102,6 +84,7 @@ You may add animes into your list, and if it is airing, I will let you know when
 
 # /list
 async def view_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print('/list')
     user_id = update.message.from_user.id
     user_name = update.message.from_user.username
 
@@ -131,7 +114,7 @@ async def view_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def add_anime_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     query = '+'.join(context.args)
-    print(f'Searched for {query}')
+    # print(f'Searched for {query}')
 
     if len(query.strip()) < 3 or len(query.strip()) > 50:
         print('Invalid anime name')
@@ -147,12 +130,12 @@ async def add_anime_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # TODO: implement refresh token stuff 1 month ltr if access token expire 
 
-    results = fetch_anime_search_results(query)
+    results = await fetch_anime_search_results(query)
 
     # Display 4 results
     buttons = []
     for result in results:
-        print(result)
+        # print(result)
         anime_title = result['node']['title']
         anime_id = result['node']['id']
         buttons.append([InlineKeyboardButton(anime_title, callback_data=f"add_{query}_{anime_id}_0")])
@@ -194,7 +177,7 @@ async def remove_anime_command(update: Update, context: ContextTypes.DEFAULT_TYP
                 raise Exception
             remove_arrid = remove_id - 1
             remove_anime_name, remove_anime_id = anime_list[remove_arrid]
-            print(remove_anime_name, remove_anime_id)
+            # print(remove_anime_name, remove_anime_id)
             conn = sqlite3.connect('database.db')
             c = conn.cursor()
             c.execute('DELETE FROM userlists WHERE user_id = ? AND anime_id = ?', (user_id, remove_anime_id,))
@@ -216,54 +199,6 @@ async def remove_anime_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
             await update.message.reply_text(text, parse_mode="Markdown")
 
-
-
-
-
-
-# TODO: allow users to start and stop tracking. for now, tracking will default start upon /start
-
-# def remove_job_if_exists(name: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
-#     """Remove job with given name. Returns whether job was removed."""
-#     current_jobs = context.job_queue.get_jobs_by_name(name)
-#     print('current jobs', current_jobs)
-#     if not current_jobs:
-#         print(False)
-#         return False
-#     for job in current_jobs:
-#         job.schedule_removal()
-#     print(True)
-#     return True
-
-# # /trackstart
-# async def start_track_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-#     print(update.message)
-#     chat_id = update.message.chat.id
-#     print(chat_id)
-
-#     job_removed = remove_job_if_exists(str(chat_id),context)
-#     if job_removed:
-#         await update.message.reply_text('Tracking is already running.')
-#     else:
-#         print(context.job_queue)
-#         context.job_queue.run_repeating(check_new_episodes, interval=5, first=0)
-#         print(context.job_queue)
-#         await update.message.reply_text('Started tracking for new episodes.')
-
-# # /trackstop
-# async def stop_track_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-#     print(update.message)
-#     chat_id = update.message.chat_id
-#     job_removed = remove_job_if_exists(str(chat_id),context)
-#     if job_removed:
-#         await update.message.reply_text('Stopped tracking for new episodes.')
-#     else:
-#         await update.message.reply_text('Tracking is not running.')
-        
-        
-
-
-
 # Check for new episodes
 async def check_new_episodes(context: ContextTypes.DEFAULT_TYPE):
     print('Checking for new episode...')
@@ -272,84 +207,88 @@ async def check_new_episodes(context: ContextTypes.DEFAULT_TYPE):
 
     # Only check the animes from the database which the user has
 
-    # TODO: remove anime which finished airing from database?? (not sure)
-
     c.execute('SELECT a.anime_id, a.title, a.num_episodes, a.latest_episode FROM animes AS a, userlists AS u WHERE a.anime_id = u.anime_id AND a.status != "finished_airing"')
     results = c.fetchall()
     print(results)
+    # print(results)
     conn.close()
 
     for anime in results:
+        # print(anime)
         id, title, num_episodes, latest_episode_db = anime
         latest_episode_online = await get_latest_episode(id)
 
 
-        # if id == 52481:
-        #     latest_episode_online = 12
+        # if id == 55791:
+        #     latest_episode_online = 13
 
-        print(latest_episode_online, latest_episode_db)
+        # print(latest_episode_online, latest_episode_db)
 
-        # New episode!
-        if latest_episode_online > latest_episode_db:
-            print('new ep')
-            status = 'currently_airing'
+        # No new episode
+        if latest_episode_online <= latest_episode_db:
+            print(f'[{title}]: NO new episode')
+            continue
+        
+        # New episode
+        print(f'[{title}]: New episode')
+        status = 'currently_airing'
 
-            notification = f'Episode {latest_episode_online} of *{title}* has been released!'
+        notification = f'Episode {latest_episode_online} of *{title}* has been released!'
 
-            # Anime ended, remove from database
-            if num_episodes == latest_episode_online:
-                print('anime ended')
-                status = 'finished_airing'
-                notification += '\nThis anime has ended!'
+        conn = sqlite3.connect('database.db')
+        c = conn.cursor()
 
-                # Update database
-                conn = sqlite3.connect('database.db')
-                c = conn.cursor()
-                c.execute('DELETE FROM animes WHERE anime_id = ?',(id,))
-                conn.commit()
-                conn.close()
+        # Anime ended, remove from database
+        if num_episodes == latest_episode_online:
+            print(f'{title} ended')
+            status = 'finished_airing'
+            notification += '\nThis anime has ended!'
+            c.execute('DELETE FROM animes WHERE anime_id = ?',(id,))
 
-            else:
-                # Update database
-                conn = sqlite3.connect('database.db')
-                c = conn.cursor()
-                c.execute('UPDATE animes SET status = ?, latest_episode = ? WHERE anime_id = ?', (status, latest_episode_online,id,))
-                conn.commit()
-                conn.close()
+            # NOT SURE WHY FOREIGN KEY NOT WORKING, DELETE MANUALLY FROM userlists FIRST
+            
+            c.execute('DELETE FROM userlists WHERE anime_id = ?', (id,))
+            conn.commit()
+            conn.close()
 
-            print('context\n',context)
-
-            print(context.job.chat_id)
-
-            # Notify user
-            await context.bot.send_message(context.job.chat_id, text=notification,parse_mode="Markdown")
-
-
-
-        # No new episode :(
         else:
-            print('NO new ep')
-            pass
+            # Ongoing anime, update database
+            c.execute('UPDATE animes SET status = ?, latest_episode = ? WHERE anime_id = ?', (status, latest_episode_online,id,))
+            conn.commit()
+            conn.close()
+            # conn.commit()
 
+            # c.execute('SELECT user_id FROM userlists WHERE anime_id = ?', (id,))
+            # users = c.fetchall()
+
+
+        # conn.commit()
+        # conn.close()
+
+        # Notify all users with the anime
+        # for user in users:
+        await context.bot.send_message(context.job.chat_id, text=notification,parse_mode="Markdown")
+
+            
 
 # Callback query handler
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.callback_query.from_user.id
     query = update.callback_query
     query_data = query.data
-    print(query_data)
+    # print(query_data)
 
     if query_data.startswith('offset_'):
 
         '''Retrieve queried animes at specified offset'''
 
-        print('NEXT')
+        # print('NEXT')
         parts = query_data.split('_')
         search_query = parts[1]
         offset = int(parts[2])
-        print(parts)
+        # print(parts)
 
-        results = fetch_anime_search_results(search_query, offset)
+        results = await fetch_anime_search_results(search_query, offset)
         buttons = []
         for result in results:
             anime_title = result['node']['title']
@@ -376,9 +315,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         anime_id = parts[2]
         offset = int(parts[3])
 
-        print('current offset:', offset)
-        results = fetch_anime_info(anime_id)
-        print(results)
+        # print('current offset:', offset)
+        results = await fetch_anime_info(anime_id)
+        # print(results)
         title = results['title']
 
         start_date = results['start_date']
@@ -391,10 +330,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         synopsis = results['synopsis']
         num_episodes = results['num_episodes']
         status = results['status'].title().replace('_',' ')
-        # print(status)
+        # # print(status)
         try:
             broadcast_day = results['broadcast']['day_of_the_week'].title()
-            # print(broadcast_day)
+            # # print(broadcast_day)
             broadcast_time = results['broadcast']['start_time']
         except:
             broadcast_day = broadcast_time = None
@@ -440,7 +379,7 @@ Status: {status}
                 InlineKeyboardButton('No', callback_data=f"offset_{search_query}_{offset}")]
                 ]
 
-                print(user_id, anime_id)
+                # print(user_id, anime_id)
 
         reply_markup = InlineKeyboardMarkup(buttons)
         await query.edit_message_text(text,parse_mode="Markdown",reply_markup=reply_markup)
@@ -463,7 +402,7 @@ Status: {status}
         c.execute("SELECT * FROM animes WHERE anime_id = ?", (anime_id,))
         result = c.fetchone()
         # Get anime info
-        anime_info = fetch_anime_info(anime_id)
+        anime_info = await fetch_anime_info(anime_id)
         title = anime_info['title']
 
         # Anime not in table
@@ -473,7 +412,7 @@ Status: {status}
             start_date = anime_info['start_date']
             num_episodes = anime_info['num_episodes']
             status = anime_info['status']
-            latest_episode = get_latest_episode(anime_id)
+            latest_episode = await get_latest_episode(anime_id)
             # print(status)
             try:
                 broadcast_day = anime_info['broadcast']['day_of_the_week']
@@ -490,11 +429,7 @@ Status: {status}
         conn.commit()
         conn.close()
 
-        print('added')
-        print(update)
-
         await query.edit_message_text(f'*{title}* has been added into your list!', parse_mode="Markdown")
-        # await query.message.reply_text()
 
 
 # Responses
@@ -543,6 +478,9 @@ def main():
     c = conn.cursor()
     print('Connected to database!')
 
+
+    
+    
     # Create "animes" table
     sql = '''
     CREATE TABLE IF NOT EXISTS animes (
@@ -579,8 +517,6 @@ def main():
     app.add_handler(CommandHandler('list', view_list_command))
     app.add_handler(CommandHandler('add', add_anime_command))
     app.add_handler(CommandHandler('remove', remove_anime_command))
-    # app.add_handler(CommandHandler('trackstart', start_track_command))
-    # app.add_handler(CommandHandler('trackstop', stop_track_command))
 
     # Messages
     app.add_handler(MessageHandler(filters.TEXT, handle_message))
@@ -591,7 +527,7 @@ def main():
     # Errors
     app.add_error_handler(error)
 
-
+    
 
     # Polls the bot
     print('Polling...')
