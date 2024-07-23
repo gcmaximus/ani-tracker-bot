@@ -1,17 +1,11 @@
 import configparser
 import sqlite3
-import requests
-import secrets
-import time
-import asyncio
-import threading
-import schedule
 import aiohttp
 from bs4 import BeautifulSoup
 from datetime import datetime
 from typing import Final
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, CallbackContext
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
 
 # Fetch configurations
@@ -20,7 +14,7 @@ config.read('config.ini')
 TOKEN: Final = config['botinfo']['token']
 BOT_USERNAME: Final = config['botinfo']['bot_username']
 MAL_CLIENT_ID: Final = config['mal']['client_id']
-MAL_ACCESS_TOKEN: Final = config['mal']['access_token']
+MAL_ACCESS_TOKEN = config['mal']['access_token']
 
 # Helper functions
 async def fetch_anime_search_results(query, offset=0):
@@ -71,7 +65,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
     await update.message.reply_text('Hi! I am a bot that notifies you of new anime episodes based on your anime list. Run /help for a list of commands to get started.')
-    context.job_queue.run_repeating(check_new_episodes, interval=30,first=1.0,chat_id=update.message.chat_id)
+    job = context.job_queue.run_repeating(check_new_episodes, interval=30,first=1.0,chat_id=update.message.chat_id)
+
+# /stop
+# async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+#     print('/stop')
+#     await update.message.reply_text('Tracking stopped. Run /start to resume tracking.')
+#     context.job_queue.
 
 # /help
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -527,7 +527,8 @@ def main():
     # Errors
     app.add_error_handler(error)
 
-    
+    # Thread for scheduled job
+    # threading.Thread(target=check_new_episodes)
 
     # Polls the bot
     print('Polling...')
